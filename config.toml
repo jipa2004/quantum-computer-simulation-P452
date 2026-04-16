@@ -1,0 +1,6 @@
+[theme]
+primaryColor        = "#800000"       # Maroon
+backgroundColor     = "#FFFFFF"       # White
+secondaryBackgroundColor = "#F5F0F0"  # Soft warm white for sidebars/cards
+textColor           = "#1A0000"       # Near-black with warm undertone
+font                = "serif"
