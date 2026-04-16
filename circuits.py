@@ -252,10 +252,18 @@ def build_custom_circuit(num_qubits: int, operations: list):
             qc.z(op["qubit"])
         elif gate == "RX":
             qc.rx(op["param"], op["qubit"])
+        elif gate == "RY":
+            qc.ry(op["param"], op["qubit"])
         elif gate == "RZ":
             qc.rz(op["param"], op["qubit"])
         elif gate == "CX":
             qc.cx(op["control"], op["target"])
+        elif gate == "SWAP":
+            # Decompose into 3 CNOTs so it is visible as native gates
+            a, b = op["control"], op["target"]
+            qc.cx(a, b)
+            qc.cx(b, a)
+            qc.cx(a, b)
 
     qc.measure(range(num_qubits), range(num_qubits))
     return qc
