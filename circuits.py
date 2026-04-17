@@ -268,68 +268,113 @@ def long_distance_cnot_circuit():
 # ─────────────────────────────────────────────
 # Q3  Fermi-Hubbard Trotterized circuit
 # ─────────────────────────────────────────────
-def hubbard_trotter_circuit(u_over_j: float, tau: float = 1.0, n_steps: int = 1,
-                             init_state: str = "1000"):
+def hubbard_trotter_circuit(J: float, U: float, tau: float = 1.0,
+                             n_steps: int = 1, init_ops: list = None):
     """
-    4-qubit 2-site Hubbard model via Jordan-Wigner + Trotter decomposition.
+    4-qubit 2-site Fermi-Hubbard model via Jordan-Wigner + first-order Trotter.
 
-    Qubits: q0=site1↑, q1=site1↓, q2=site2↑, q3=site2↓
-    J=1 (fixed), U=u_over_j*J
+    Qubits: q0=site1↑  q1=site1↓  q2=site2↑  q3=site2↓
 
-    Hopping:  H_J = J/2 (XX + YY) on (q0,q2) and (q1,q3)
-    Interaction: H_U = U/4 (I - Z0 - Z1 + Z0Z1)  [site1]
-                      + U/4 (I - Z2 - Z3 + Z2Z3)  [site2]
+    Hamiltonian (JW-mapped):
+      H = -(J/2)[X0 Z1 X2 + Y0 Z1 Y2 + X1 Z2 X3 + Y1 Z2 Y3]
+          - (U/4)(Z0 + Z1 + Z2 + Z3)
+          + (U/4)(Z0 Z1 + Z2 Z3)
 
-    One Trotter step: exp(-i H_J dt) exp(-i H_U dt)
+    Each Trotter step implements exp(-i H dt) ≈ exp(-i H_hop dt) exp(-i H_int dt).
+
+    Hopping term decomposition (X0 Z1 X2 example):
+      X0 Z1 X2 = (H_0 H_2)(Z0 Z1 Z2)(H_0 H_2)
+      exp(-i θ X0Z1X2) →
+        H(0), H(2)
+        CX(0→1), CX(1→2), Rz(2θ, q2), CX(1→2), CX(0→1)
+        H(0), H(2)
+      Y0 Z1 Y2: replace H with Rx(π/2) / Rx(-π/2)
+      θ_hop = J * dt / 2  (factor of 1/2 from the -J/2 prefactor)
+
+    Interaction term decomposition:
+      ZZ: CX(a→b), Rz(θ_int, b), CX(a→b)   θ_int = U*dt/2
+      Single Z: Rz(-U*dt/2, qubit)           (from -U/4 coefficient × 2 for exp)
+
+    Parameters
+    ----------
+    J        : hopping amplitude
+    U        : on-site interaction
+    tau      : total evolution time
+    n_steps  : number of Trotter steps
+    init_ops : list of {"gate": str, "qubit": int, ...} applied before evolution
+               to set the initial state (same format as build_custom_circuit)
     """
-    J = 1.0
-    U = u_over_j * J
-    dt = tau / n_steps
+    dt       = tau / n_steps
+    theta_hop = J * dt / 2      # angle for each hopping Pauli string
+    theta_zz  = U * dt / 2      # angle for ZZ interaction
+    theta_z   = -U * dt / 2     # angle for single-Z terms (−U/4 coeff, ×2 for exp)
 
     qc = QuantumCircuit(4, 4)
 
-    # ── Initial state ─────────────────────────────────────────────
-    for i, bit in enumerate(reversed(init_state)):   # Qiskit: q0=rightmost
-        if bit == "1":
-            qc.x(i)
+    # ── Initial state via user-defined gate sequence ──────────────
+    if init_ops:
+        for op in init_ops:
+            g = op["gate"]
+            if g == "H":
+                qc.h(op["qubit"])
+            elif g == "X":
+                qc.x(op["qubit"])
+            elif g == "Z":
+                qc.z(op["qubit"])
+            elif g == "RX":
+                qc.rx(op["param"], op["qubit"])
+            elif g == "RY":
+                qc.ry(op["param"], op["qubit"])
+            elif g == "RZ":
+                qc.rz(op["param"], op["qubit"])
+            elif g == "CX":
+                qc.cx(op["control"], op["target"])
     qc.barrier(label="Init")
 
-    for _ in range(n_steps):
-        # ── Hopping term: XY-rotation on (q0,q2) and (q1,q3) ─────
-        # exp(-i θ/2 (XX+YY)) with θ = J*dt
-        # Implemented as: Rxx(2Jdt) Ryy(2Jdt)
-        angle_hop = J * dt
+    def hopping_xzx(qc, a, mid, b, theta):
+        """exp(-i theta * X_a Z_mid X_b) via CNOT ladder."""
+        qc.h(a);  qc.h(b)
+        qc.cx(a, mid); qc.cx(mid, b)
+        qc.rz(2 * theta, b)
+        qc.cx(mid, b); qc.cx(a, mid)
+        qc.h(a);  qc.h(b)
 
-        for (a, b) in [(0, 2), (1, 3)]:
-            # Rxx(2*angle_hop)
-            qc.rxx(2 * angle_hop, a, b)
-            # Ryy(2*angle_hop)
-            qc.ryy(2 * angle_hop, a, b)
+    def hopping_yzy(qc, a, mid, b, theta):
+        """exp(-i theta * Y_a Z_mid Y_b) via CNOT ladder."""
+        qc.rx(np.pi / 2, a);  qc.rx(np.pi / 2, b)
+        qc.cx(a, mid); qc.cx(mid, b)
+        qc.rz(2 * theta, b)
+        qc.cx(mid, b); qc.cx(a, mid)
+        qc.rx(-np.pi / 2, a);  qc.rx(-np.pi / 2, b)
 
-        qc.barrier(label="Hop")
+    def zz_interaction(qc, a, b, theta):
+        """exp(-i theta * Z_a Z_b) via CX sandwich."""
+        qc.cx(a, b)
+        qc.rz(2 * theta, b)
+        qc.cx(a, b)
 
-        # ── Interaction term: ZZ-rotation on (q0,q1) and (q2,q3) ─
-        # exp(-i U/4 * Z_i Z_j * dt)  → Rzz(U*dt/2)
-        # Single-qubit Z terms are global phases per sector; include as Rz
-        angle_int = U * dt / 4
+    for step in range(n_steps):
+        # ── Hopping: -(J/2) X0Z1X2 ──────────────────────────────
+        hopping_xzx(qc, 0, 1, 2, theta_hop)
+        # ── Hopping: -(J/2) Y0Z1Y2 ──────────────────────────────
+        hopping_yzy(qc, 0, 1, 2, theta_hop)
+        # ── Hopping: -(J/2) X1Z2X3 ──────────────────────────────
+        hopping_xzx(qc, 1, 2, 3, theta_hop)
+        # ── Hopping: -(J/2) Y1Z2Y3 ──────────────────────────────
+        hopping_yzy(qc, 1, 2, 3, theta_hop)
+        qc.barrier(label=f"Hop {step+1}")
 
-        for (a, b) in [(0, 1), (2, 3)]:
-            qc.rzz(2 * angle_int, a, b)  # ZZ part
-            qc.rz(-2 * angle_int, a)     # -Z_a part
-            qc.rz(-2 * angle_int, b)     # -Z_b part
-
-        qc.barrier(label="Int")
+        # ── Interaction: +(U/4) Z0 Z1 ────────────────────────────
+        zz_interaction(qc, 0, 1, theta_zz)
+        # ── Interaction: +(U/4) Z2 Z3 ────────────────────────────
+        zz_interaction(qc, 2, 3, theta_zz)
+        # ── Single-Z: -(U/4)(Z0+Z1+Z2+Z3) ───────────────────────
+        for q in range(4):
+            qc.rz(2 * theta_z, q)
+        qc.barrier(label=f"Int {step+1}")
 
     qc.measure(range(4), range(4))
     return qc
-
-
-# ─────────────────────────────────────────────
-# Legacy / simple Hubbard preset (for UI preset tab)
-# ─────────────────────────────────────────────
-def hubbard_circuit(u_over_j: float):
-    """Simple single Trotter step for the UI preset selector."""
-    return hubbard_trotter_circuit(u_over_j, tau=1.0, n_steps=1, init_state="1000")
 
 
 # ─────────────────────────────────────────────

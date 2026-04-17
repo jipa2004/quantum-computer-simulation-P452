@@ -284,128 +284,162 @@ with tab_preset:
         st.markdown("### Fermi-Hubbard Model (Trotterized)")
         st.markdown("""
         <div class="card">
-        4-qubit 2-site Hubbard model via Jordan-Wigner mapping + Trotter decomposition.<br>
-        <b>q0</b> = site 1 up &nbsp;&middot;&nbsp; <b>q1</b> = site 1 down &nbsp;&middot;&nbsp;
-        <b>q2</b> = site 2 up &nbsp;&middot;&nbsp; <b>q3</b> = site 2 down
+        4-qubit 2-site Fermi-Hubbard model via Jordan-Wigner mapping + first-order Trotter.<br>
+        <b>q0</b> = site 1 &uarr; &nbsp;&middot;&nbsp; <b>q1</b> = site 1 &darr;
+        &nbsp;&middot;&nbsp; <b>q2</b> = site 2 &uarr; &nbsp;&middot;&nbsp; <b>q3</b> = site 2 &darr;<br>
+        H = &minus;(J/2)[X&#8320;Z&#8321;X&#8322; + Y&#8320;Z&#8321;Y&#8322; + X&#8321;Z&#8322;X&#8323; + Y&#8321;Z&#8322;Y&#8323;]
+        &minus; (U/4)(Z&#8320;+Z&#8321;+Z&#8322;+Z&#8323;) + (U/4)(Z&#8320;Z&#8321; + Z&#8322;Z&#8323;)
         </div>
         """, unsafe_allow_html=True)
 
-        sub = st.selectbox(
-            "Checkpoint",
-            ["Q3.1 - Circuit Architecture (1 Trotter step)",
-             "Q3.2 - Non-Interacting Dynamics (U = 0)",
-             "Q3.3 - Mott Physics (U = 10)"],
-            key="hubbard_sub",
-        )
+        # ── Parameters ────────────────────────────
+        pc1, pc2, pc3, pc4 = st.columns(4)
+        with pc1:
+            J_val   = st.slider("J (hopping)", 0.0, 5.0, 1.0, step=0.1, key="hub_J")
+        with pc2:
+            U_val   = st.slider("U (interaction)", 0.0, 20.0, 4.0, step=0.5, key="hub_U")
+        with pc3:
+            tau_val = st.slider("τ (time step)", 0.01, float(np.pi), 1.0,
+                                step=0.01, key="hub_tau")
+        with pc4:
+            n_steps_val = st.slider("Trotter steps", 1, 20, 1, key="hub_nsteps")
+
         st.markdown("---")
 
-        if sub.startswith("Q3.1"):
+        # ── Initial state builder ─────────────────
+        st.markdown('<div class="section-label">Initial State</div>', unsafe_allow_html=True)
+        st.caption(
+            "Build the initial 4-qubit state using the gate editor below. "
+            "Leave empty for |0000⟩. "
+            "Example: X on q0 gives |1000⟩ (one ↑ electron at Site 1)."
+        )
+
+        HUB_GATES     = ["X", "H", "RY", "RX", "RZ", "CX"]
+        HUB_TWO_QUBIT = ["CX"]
+
+        if "hub_init_ops" not in st.session_state:
+            st.session_state.hub_init_ops = []
+
+        def hub_op_label(op):
+            g = op["gate"]
+            if g in ["RX", "RY", "RZ"]:
+                return f"{g}(θ={op['param']:.3f}) q{op['qubit']}"
+            elif g == "CX":
+                return f"CX q{op['control']}→q{op['target']}"
+            else:
+                return f"{g} q{op['qubit']}"
+
+        def hub_make_op(gate, qubit, ctrl, tgt, param):
+            op = {"gate": gate}
+            if gate in ["RX", "RY", "RZ"]:
+                op["qubit"] = qubit
+                op["param"] = param
+            elif gate == "CX":
+                op["control"] = ctrl
+                op["target"]  = tgt
+            else:
+                op["qubit"] = qubit
+            return op
+
+        init_left, init_right = st.columns([1, 2], gap="large")
+
+        with init_left:
+            hub_gate = st.selectbox("Gate", HUB_GATES, key="hub_gate")
+
+            if hub_gate in ["RX", "RY", "RZ"]:
+                hub_param = st.slider("Angle θ", 0.0, float(2 * np.pi), np.pi / 2,
+                                      format="%.3f", key="hub_angle")
+            else:
+                hub_param = 0.0
+
+            if hub_gate == "CX":
+                hca, hcb = st.columns(2)
+                with hca:
+                    hub_ctrl = int(st.number_input("Control", 0, 3, 0, key="hub_ctrl"))
+                with hcb:
+                    hub_tgt  = int(st.number_input("Target",  0, 3, 1, key="hub_tgt"))
+                hub_qubit = 0
+            else:
+                hub_qubit = int(st.number_input("Qubit (0–3)", 0, 3, 0, key="hub_qubit"))
+                hub_ctrl = hub_tgt = 0
+
+            hb1, hb2 = st.columns(2)
+            with hb1:
+                if st.button("Append", key="hub_add", use_container_width=True):
+                    st.session_state.hub_init_ops.append(
+                        hub_make_op(hub_gate, hub_qubit, hub_ctrl, hub_tgt, hub_param)
+                    )
+                    st.rerun()
+            with hb2:
+                if st.button("Clear", key="hub_clear", use_container_width=True):
+                    st.session_state.hub_init_ops = []
+                    st.rerun()
+
+            hub_ops = st.session_state.hub_init_ops
+            if hub_ops:
+                st.markdown("**Gate sequence:**")
+                hub_action = None
+                hc = st.columns([2, 1, 1, 1, 1])
+                for col, lbl in zip(hc, ["Gate", "↑", "↓", "🗑", "＋"]):
+                    col.markdown(f"<small><b>{lbl}</b></small>", unsafe_allow_html=True)
+                for i, op in enumerate(hub_ops):
+                    rc = st.columns([2, 1, 1, 1, 1])
+                    rc[0].markdown(
+                        f"`{i+1}.` <span style='font-family:monospace;font-size:0.8rem'>"
+                        f"{hub_op_label(op)}</span>",
+                        unsafe_allow_html=True,
+                    )
+                    if rc[1].button("↑", key=f"hub_up_{i}", disabled=(i == 0),
+                                    use_container_width=True):
+                        hub_action = ("move_up", i)
+                    if rc[2].button("↓", key=f"hub_dn_{i}",
+                                    disabled=(i == len(hub_ops) - 1),
+                                    use_container_width=True):
+                        hub_action = ("move_down", i)
+                    if rc[3].button("🗑", key=f"hub_del_{i}", use_container_width=True):
+                        hub_action = ("delete", i)
+                    if rc[4].button("＋", key=f"hub_ins_{i}", use_container_width=True):
+                        hub_action = ("insert_after", i)
+
+                if hub_action:
+                    kind, idx = hub_action
+                    if kind == "move_up":
+                        hub_ops[idx-1], hub_ops[idx] = hub_ops[idx], hub_ops[idx-1]
+                    elif kind == "move_down":
+                        hub_ops[idx], hub_ops[idx+1] = hub_ops[idx+1], hub_ops[idx]
+                    elif kind == "delete":
+                        hub_ops.pop(idx)
+                    elif kind == "insert_after":
+                        hub_ops.insert(
+                            idx + 1,
+                            hub_make_op(hub_gate, hub_qubit, hub_ctrl, hub_tgt, hub_param)
+                        )
+                    st.rerun()
+
+        with init_right:
+            # Always show current Hubbard circuit (updates live with sliders + init state)
+            qc_hub = hubbard_trotter_circuit(
+                J=J_val, U=U_val, tau=tau_val,
+                n_steps=n_steps_val,
+                init_ops=st.session_state.hub_init_ops,
+            )
+            draw_circuit(qc_hub, "Hubbard Circuit (1 Trotter step shown)")
             st.markdown("""
-            One Trotter step of the Hubbard Hamiltonian.
-            **Hopping term**: Rxx + Ryy on (q0,q2) and (q1,q3).
-            **Interaction term**: Rzz + single-qubit Rz on (q0,q1) and (q2,q3).
-            """)
-            col1, col2 = st.columns(2)
-            with col1:
-                uj  = st.slider("U/J", 0.0, 10.0, 1.0, step=0.1, key="q31_uj")
-            with col2:
-                tau = st.slider("tau (time step)", 0.01, float(np.pi), 1.0,
-                                step=0.01, key="q31_tau")
-            circuit = hubbard_trotter_circuit(uj, tau=tau, n_steps=1, init_state="1000")
-            draw_circuit(circuit, "Q3.1 - One Trotter Step")
-            st.markdown("""
-            **Gate key:** rxx/ryy = hopping (JW XY term) | rzz = interaction ZZ part | rz = single-site Z shifts
+            **Gate key:**  
+            H / Rx(±π/2) sandwiches → basis change for X·Z·X / Y·Z·Y hopping strings  
+            CX ladder + Rz → hopping Pauli string exp (θ_hop = J·τ/2·n_steps)  
+            CX + Rz → ZZ interaction (θ_int = U·τ/2·n_steps)  
+            Rz on each qubit → single-site Z shifts (−U/4 terms)
             """)
 
-        elif sub.startswith("Q3.2"):
-            st.markdown("""
-            **U = 0, J = 1.** Initial state: |1000> (one up electron at Site 1).
-            Plot P(|0010>) vs tau in [0, pi].
-            """)
-            col1, col2 = st.columns(2)
-            with col1:
-                n_steps = st.slider("Trotter steps per time point", 1, 20, 10, key="q32_steps")
-            with col2:
-                n_pts = st.slider("Number of time points", 10, 60, 30, key="q32_pts")
+        st.markdown("---")
 
-            if st.button("Compute Dynamics", key="run_q32"):
-                times      = np.linspace(0, np.pi, n_pts)
-                probs_sim  = []
-                probs_anal = []
-                progress   = st.progress(0, text="Running ...")
-                for i, tau in enumerate(times):
-                    qc = hubbard_trotter_circuit(0.0, tau=tau, n_steps=n_steps,
-                                                 init_state="1000")
-                    counts = run_and_get_histogram(qc, shots=2048)
-                    total  = sum(counts.values())
-                    probs_sim.append(counts.get("0010", 0) / total)
-                    probs_anal.append(np.sin(tau) ** 2)
-                    progress.progress((i + 1) / n_pts, text=f"tau = {tau:.3f} ...")
-                progress.empty()
-                fig, ax = plt.subplots(figsize=(8, 4))
-                ax.plot(times, probs_anal, "--", color="#AAAAAA", lw=2,
-                        label="Analytical sin^2(tau)")
-                ax.plot(times, probs_sim, "o-", color=MAROON, ms=5, lw=1.8,
-                        label="Simulation")
-                ax.set_xlabel("Time tau", fontsize=12)
-                ax.set_ylabel("P(|0010>)", fontsize=12)
-                ax.set_title("Q3.2 - Electron Hopping (U=0, J=1)", fontsize=13)
-                ax.legend(fontsize=11)
-                ax.spines[["top", "right"]].set_visible(False)
-                fig.patch.set_facecolor("white")
-                plt.tight_layout()
-                st.pyplot(fig, use_container_width=True)
-                plt.close(fig)
-                st.markdown("""
-                **Analysis:** Peak at tau=pi/2 confirms complete transfer to Site 2,
-                matching the Rabi oscillation P=sin^2(Jt), period T=pi/J=pi.
-                Trotter error shrinks as n_steps increases.
-                """)
-
-        else:
-            st.markdown("""
-            **U = 10, J = 1.** Initial state: |1100> (both electrons at Site 1).
-            Compare P(|1100>) vs P(|0011>) over time.
-            """)
-            col1, col2 = st.columns(2)
-            with col1:
-                n_steps = st.slider("Trotter steps per time point", 1, 20, 10, key="q33_steps")
-            with col2:
-                n_pts = st.slider("Number of time points", 10, 60, 30, key="q33_pts")
-
-            if st.button("Compute Mott Dynamics", key="run_q33"):
-                times    = np.linspace(0, np.pi, n_pts)
-                p_1100   = []
-                p_0011   = []
-                progress = st.progress(0, text="Running ...")
-                for i, tau in enumerate(times):
-                    qc = hubbard_trotter_circuit(10.0, tau=tau, n_steps=n_steps,
-                                                 init_state="1100")
-                    counts = run_and_get_histogram(qc, shots=2048)
-                    total  = sum(counts.values())
-                    p_1100.append(counts.get("1100", 0) / total)
-                    p_0011.append(counts.get("0011", 0) / total)
-                    progress.progress((i + 1) / n_pts, text=f"tau = {tau:.3f} ...")
-                progress.empty()
-                fig, ax = plt.subplots(figsize=(8, 4))
-                ax.plot(times, p_1100, "o-", color=MAROON,    ms=5, lw=1.8,
-                        label="|1100> (Site 1)")
-                ax.plot(times, p_0011, "s-", color="#4E6A9E", ms=5, lw=1.8,
-                        label="|0011> (Site 2 doublon)")
-                ax.set_xlabel("Time tau", fontsize=12)
-                ax.set_ylabel("Probability", fontsize=12)
-                ax.set_title("Q3.3 - Mott Physics (U=10, J=1)", fontsize=13)
-                ax.legend(fontsize=11)
-                ax.spines[["top", "right"]].set_visible(False)
-                fig.patch.set_facecolor("white")
-                plt.tight_layout()
-                st.pyplot(fig, use_container_width=True)
-                plt.close(fig)
-                st.markdown("""
-                **Mott Insulator Physics:** With U/J=10, Coulomb repulsion far exceeds hopping.
-                Moving both electrons to Site 2 costs energy U, suppressing tunneling.
-                The residual oscillation is a virtual second-order process proportional to J^2/U.
-                """)
+        # ── Run simulation ────────────────────────
+        n_shots = st.slider("Shots", 256, 4096, 1024, step=256, key="hub_shots")
+        if st.button("Run Hubbard Simulation", key="run_hub"):
+            with st.spinner("Simulating ..."):
+                counts = run_and_get_histogram(qc_hub, shots=n_shots)
+            show_histogram(counts, "Hubbard – Measurement Results")
 
 
 # ═══════════════════════════════════════════════════════════════
