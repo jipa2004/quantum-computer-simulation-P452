@@ -450,20 +450,35 @@ with tab_preset:
                     unsafe_allow_html=True)
         st.caption(
             "Sweeps τ from 0 to the current slider value and plots the exact "
-            "statevector probability of the selected states at each time point."
+            "statevector probability of the selected states at each time point. "
+            "Use ≥ 20 Trotter steps (dynamics) for accurate results — "
+            "too few steps produce completely wrong physics regardless of U."
         )
 
-        # All 16 possible 4-qubit bitstrings (Qiskit ordering: q3q2q1q0)
+        # All 16 possible 4-qubit bitstrings displayed q3q2q1q0 (MSB first)
         all_states = [format(i, "04b") for i in range(16)]
 
         dyn_col1, dyn_col2 = st.columns([1, 2])
         with dyn_col1:
             n_pts = st.slider("Time points", 10, 100, 40, key="hub_npts")
+            dyn_steps = st.slider(
+                "Trotter steps (dynamics)",
+                min_value=5, max_value=200, value=50, step=5,
+                key="hub_dyn_steps",
+                help="Keep ≥ 20 for reliable results. The circuit diagram uses "
+                     "the separate Trotter steps slider above.",
+            )
             selected_states = st.multiselect(
                 "States to plot",
                 options=all_states,
-                default=["1000", "0010"],   # sensible starting default
+                default=["0011", "1100"],
                 key="hub_states",
+            )
+
+        if dyn_steps < 10:
+            st.warning(
+                f"⚠️ {dyn_steps} Trotter steps is too coarse — dynamics will be "
+                "inaccurate. Use ≥ 20 for qualitatively correct results."
             )
 
         if st.button("Compute Dynamics", key="hub_dynamics"):
@@ -471,42 +486,32 @@ with tab_preset:
                 st.warning("Select at least one state to plot.")
             else:
                 times = np.linspace(0.0, tau_val, n_pts)
-                # probs[state] = list of probabilities at each time point
                 probs_t = {s: [] for s in selected_states}
 
                 progress = st.progress(0, text="Computing statevectors ...")
                 for ti, t in enumerate(times):
-                    if t == 0.0:
-                        # Build a circuit with just init ops and measure to get |init> probs
-                        qc_t = hubbard_trotter_circuit(
-                            J=J_val, U=U_val, tau=1e-9,
-                            n_steps=1,
-                            init_ops=st.session_state.hub_init_ops,
-                        )
-                    else:
-                        qc_t = hubbard_trotter_circuit(
-                            J=J_val, U=U_val, tau=t,
-                            n_steps=n_steps_val,
-                            init_ops=st.session_state.hub_init_ops,
-                        )
+                    # Use tiny nonzero tau at t=0 so circuit is valid
+                    tau_t = t if t > 1e-10 else 1e-10
+                    qc_t = hubbard_trotter_circuit(
+                        J=J_val, U=U_val, tau=tau_t,
+                        n_steps=dyn_steps,
+                        init_ops=st.session_state.hub_init_ops,
+                    )
 
                     from quantum_simulator_backend import get_statevector
-                    sv = get_statevector(qc_t)          # complex amplitudes, length 16
-                    probs_all = np.abs(sv) ** 2         # probabilities for all 16 states
+                    sv = get_statevector(qc_t)
+                    probs_all = np.abs(sv) ** 2
 
-                    # Qiskit statevector index i corresponds to bitstring bin(i)
-                    # with q0 = LSB.  The displayed bitstring is big-endian (q3q2q1q0),
-                    # so state "1000" means q3=1,q2=0,q1=0,q0=0 → index 8.
+                    # Displayed string s is q3q2q1q0 (MSB first).
+                    # Qiskit SV: q0=LSB, so int(s,2) maps correctly:
+                    # "1100" → q3=1,q2=1,q1=0,q0=0 → index 12. ✓
                     for s in selected_states:
-                        idx = int(s, 2)                 # "1000" → 8, "0010" → 2
-                        probs_t[s].append(float(probs_all[idx]))
+                        probs_t[s].append(float(probs_all[int(s, 2)]))
 
-                    progress.progress((ti + 1) / n_pts,
-                                      text=f"τ = {t:.3f} ...")
+                    progress.progress((ti + 1) / n_pts, text=f"τ = {t:.3f} ...")
                 progress.empty()
 
                 # ── Plot ──────────────────────────────────
-                # Use a colour palette that works well with the maroon theme
                 palette = [
                     MAROON, "#4E6A9E", "#2E8B57", "#D4853A",
                     "#7B3F9E", "#C0392B", "#1A7A6E", "#8B6914",
@@ -516,8 +521,8 @@ with tab_preset:
 
                 fig, ax = plt.subplots(figsize=(9, 4))
                 for si, s in enumerate(selected_states):
-                    color = palette[si % len(palette)]
-                    ax.plot(times, probs_t[s], "-o", color=color,
+                    ax.plot(times, probs_t[s], "-o",
+                            color=palette[si % len(palette)],
                             ms=3, lw=1.8, label=f"|{s}⟩")
 
                 ax.set_xlabel("Time τ", fontsize=12)
@@ -526,7 +531,7 @@ with tab_preset:
                 ax.set_xlim(times[0], times[-1])
                 ax.set_title(
                     f"Hubbard dynamics  (J={J_val}, U={U_val}, "
-                    f"{n_steps_val} Trotter step{'s' if n_steps_val > 1 else ''})",
+                    f"{dyn_steps} Trotter steps)",
                     fontsize=12,
                 )
                 ax.legend(fontsize=10, loc="upper right",
@@ -540,8 +545,8 @@ with tab_preset:
 
                 with st.expander("Raw probability table"):
                     import pandas as pd
-                    df = pd.DataFrame({"τ": times, **{f"|{s}⟩": probs_t[s]
-                                                      for s in selected_states}})
+                    df = pd.DataFrame({"τ": times,
+                                       **{f"|{s}⟩": probs_t[s] for s in selected_states}})
                     st.dataframe(df.style.format("{:.4f}"), use_container_width=True)
 
 

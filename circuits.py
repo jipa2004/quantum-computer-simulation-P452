@@ -304,10 +304,18 @@ def hubbard_trotter_circuit(J: float, U: float, tau: float = 1.0,
     init_ops : list of {"gate": str, "qubit": int, ...} applied before evolution
                to set the initial state (same format as build_custom_circuit)
     """
-    dt       = tau / n_steps
-    theta_hop = J * dt / 2      # angle for each hopping Pauli string
-    theta_zz  = U * dt / 2      # angle for ZZ interaction
-    theta_z   = -U * dt / 2     # angle for single-Z terms (−U/4 coeff, ×2 for exp)
+    dt        = tau / n_steps
+    # θ_hop = J·Δt  → Rz angle = -J·dt  (negative because H has -J/2 prefactor)
+    # exp(-i·(-J/2)·XZX·dt): basis-change to ZZZ then exp(+i·(J/2)·dt·ZZZ)
+    # CX ladder puts all parity onto target qubit → Rz(-J·dt) since Rz(φ)=exp(-iφZ/2)
+    theta_hop_rz = -J * dt          # Rz angle for hopping strings
+
+    # θ_int = U·Δt/2  → Rz angle = U·dt/2  (from +(U/4)·ZZ, exp(-i·(U/4)·ZZ·dt))
+    # CX sandwich: Rz(U·dt/2)
+    theta_zz_rz  =  U * dt / 2     # Rz angle for ZZ interaction
+
+    # Single-Z: -(U/4)·Zi → exp(+i·(U/4)·Zi·dt) → Rz(-U·dt/2)
+    theta_z_rz   = -U * dt / 2     # Rz angle for single-qubit Z terms
 
     qc = QuantumCircuit(4, 4)
 
@@ -331,46 +339,61 @@ def hubbard_trotter_circuit(J: float, U: float, tau: float = 1.0,
                 qc.cx(op["control"], op["target"])
     qc.barrier(label="Init")
 
-    def hopping_xzx(qc, a, mid, b, theta):
-        """exp(-i theta * X_a Z_mid X_b) via CNOT ladder."""
+    def hopping_xzx(qc, a, mid, b, rz_angle):
+        """
+        exp(-i·(-J/2)·X_a Z_mid X_b · dt)
+        Basis change: X_a Z_mid X_b = (H_a H_b)(Z_a Z_mid Z_b)(H_a H_b)
+        CNOT ladder collapses ZZZ parity onto qubit b.
+        From image: CNOT_{a→mid} CNOT_{mid→b} Rz(θ_hop) CNOT_{mid→b} CNOT_{a→mid}
+        """
         qc.h(a);  qc.h(b)
-        qc.cx(a, mid); qc.cx(mid, b)
-        qc.rz(2 * theta, b)
-        qc.cx(mid, b); qc.cx(a, mid)
+        qc.cx(a, mid);  qc.cx(mid, b)
+        qc.rz(rz_angle, b)
+        qc.cx(mid, b);  qc.cx(a, mid)
         qc.h(a);  qc.h(b)
 
-    def hopping_yzy(qc, a, mid, b, theta):
-        """exp(-i theta * Y_a Z_mid Y_b) via CNOT ladder."""
-        qc.rx(np.pi / 2, a);  qc.rx(np.pi / 2, b)
-        qc.cx(a, mid); qc.cx(mid, b)
-        qc.rz(2 * theta, b)
-        qc.cx(mid, b); qc.cx(a, mid)
-        qc.rx(-np.pi / 2, a);  qc.rx(-np.pi / 2, b)
+    def hopping_yzy(qc, a, mid, b, rz_angle):
+        """
+        exp(-i·(-J/2)·Y_a Z_mid Y_b · dt)
+        Basis change from image: Y_a Z_mid Y_b = (S†_a S†_b H_a H_b)(Z_a Z_mid Z_b)(H_a H_b S_a S_b)
+        S†·H rotates Y basis → Z basis: |+y⟩→|0⟩, |-y⟩→|1⟩
+        """
+        qc.sdg(a);  qc.sdg(b)
+        qc.h(a);    qc.h(b)
+        qc.cx(a, mid);  qc.cx(mid, b)
+        qc.rz(rz_angle, b)
+        qc.cx(mid, b);  qc.cx(a, mid)
+        qc.h(a);    qc.h(b)
+        qc.s(a);    qc.s(b)
 
-    def zz_interaction(qc, a, b, theta):
-        """exp(-i theta * Z_a Z_b) via CX sandwich."""
+    def zz_interaction(qc, a, b, rz_angle):
+        """
+        exp(-i·(U/4)·Z_a Z_b · dt)
+        Standard CX sandwich: CX(a→b) Rz(θ_int) CX(a→b)
+        From image: CNOT_{a→b} Rz(θ_int)_b CNOT_{a→b}
+        """
         qc.cx(a, b)
-        qc.rz(2 * theta, b)
+        qc.rz(rz_angle, b)
         qc.cx(a, b)
 
     for step in range(n_steps):
         # ── Hopping: -(J/2) X0Z1X2 ──────────────────────────────
-        hopping_xzx(qc, 0, 1, 2, theta_hop)
+        hopping_xzx(qc, 0, 1, 2, theta_hop_rz)
         # ── Hopping: -(J/2) Y0Z1Y2 ──────────────────────────────
-        hopping_yzy(qc, 0, 1, 2, theta_hop)
+        hopping_yzy(qc, 0, 1, 2, theta_hop_rz)
         # ── Hopping: -(J/2) X1Z2X3 ──────────────────────────────
-        hopping_xzx(qc, 1, 2, 3, theta_hop)
+        hopping_xzx(qc, 1, 2, 3, theta_hop_rz)
         # ── Hopping: -(J/2) Y1Z2Y3 ──────────────────────────────
-        hopping_yzy(qc, 1, 2, 3, theta_hop)
+        hopping_yzy(qc, 1, 2, 3, theta_hop_rz)
         qc.barrier(label=f"Hop {step+1}")
 
-        # ── Interaction: +(U/4) Z0 Z1 ────────────────────────────
-        zz_interaction(qc, 0, 1, theta_zz)
-        # ── Interaction: +(U/4) Z2 Z3 ────────────────────────────
-        zz_interaction(qc, 2, 3, theta_zz)
+        # ── Interaction: +(U/4) Z0Z1 ─────────────────────────────
+        zz_interaction(qc, 0, 1, theta_zz_rz)
+        # ── Interaction: +(U/4) Z2Z3 ─────────────────────────────
+        zz_interaction(qc, 2, 3, theta_zz_rz)
         # ── Single-Z: -(U/4)(Z0+Z1+Z2+Z3) ───────────────────────
         for q in range(4):
-            qc.rz(2 * theta_z, q)
+            qc.rz(theta_z_rz, q)
         qc.barrier(label=f"Int {step+1}")
 
     qc.measure(range(4), range(4))
