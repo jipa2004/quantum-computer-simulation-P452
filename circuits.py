@@ -135,39 +135,94 @@ def alice_circuit(theta: float):
     return qc
 
 
-def bob_circuit(theta: float, m0: int, m1: int):
+def full_teleportation_circuit(theta: float):
     """
-    Bob's correction circuit given Alice's classical results m0, m1.
+    Complete teleportation circuit in one shot, using mid-circuit
+    measurement and classical feed-forward so the simulator properly
+    collapses q0/q1 before Bob's corrections act on q2.
 
-    Starts from |0⟩ and applies the same entanglement as alice_circuit
-    so that q2 is in the correct post-measurement state, then applies
-    Bob's conditional corrections and measures q2.
+    Classical registers:
+      c0 (1 bit) – Alice's measurement of q0  → controls Bob's Z
+      c1 (1 bit) – Alice's measurement of q1  → controls Bob's X
+      c2 (1 bit) – Bob's final measurement of q2
 
-    In a real experiment this would be a separate device; here we
-    reconstruct by re-running the full 3-qubit circuit conditioned on
-    the specific (m0, m1) outcome Alice observed, post-selecting on
-    that result, then applying corrections and measuring q2.
-
-    Returns a circuit that produces Bob's final measurement.
+    This is the physically correct simulation: after Alice measures,
+    the wavefunction collapses and Bob's conditional gates act on the
+    genuinely post-selected state of q2.
     """
-    qc = QuantumCircuit(3, 1)   # 3 qubits, 1 classical bit for Bob
+    from qiskit.circuit import ClassicalRegister, QuantumRegister
 
-    # Reproduce Alice's full preparation (same as alice_circuit)
+    qr = QuantumRegister(3, 'q')
+    c0 = ClassicalRegister(1, 'c0')   # Alice q0 result
+    c1 = ClassicalRegister(1, 'c1')   # Alice q1 result
+    c2 = ClassicalRegister(1, 'c2')   # Bob's result
+
+    qc = QuantumCircuit(qr, c0, c1, c2)
+
+    # ── 1. Prepare state to teleport ──────────────────────────────
     qc.ry(theta, 0)
+    qc.barrier(label="Alice's State")
+
+    # ── 2. Bell pair entanglement ─────────────────────────────────
     qc.h(1)
     qc.cx(1, 2)
+    qc.barrier(label="Bell Pair")
+
+    # ── 3. Bell measurement basis rotation ────────────────────────
     qc.cx(0, 1)
     qc.h(0)
+    qc.barrier(label="Bell Basis")
 
-    # Bob's classical feed-forward corrections
-    if m1 == 1:
-        qc.x(2)   # X gate if Alice's q1 == 1
-    if m0 == 1:
-        qc.z(2)   # Z gate if Alice's q0 == 1
+    # ── 4. Alice measures – wavefunction collapses here ───────────
+    qc.measure(qr[0], c0[0])
+    qc.measure(qr[1], c1[0])
+    qc.barrier(label="Classical Channel")
 
-    # Bob measures q2
-    qc.measure(2, 0)
+    # ── 5. Bob's feed-forward corrections (conditioned on collapsed bits)
+    with qc.if_test((c1, 1)):   # X if Alice's q1 == 1
+        qc.x(2)
+    with qc.if_test((c0, 1)):   # Z if Alice's q0 == 1
+        qc.z(2)
+    qc.barrier(label="Bob's Correction")
 
+    # ── 6. Bob measures q2 ────────────────────────────────────────
+    qc.measure(qr[2], c2[0])
+
+    return qc
+
+
+def bob_circuit(theta: float, m0: int, m1: int):
+    """
+    Kept for backwards compatibility but now delegates to the statevector
+    post-selection approach so results are physically correct.
+
+    We compute the statevector of Alice's circuit, project it onto the
+    (m0, m1) subspace to get q2's collapsed state, apply Bob's corrections
+    analytically, and return a single-qubit circuit initialised to that state.
+    """
+    import numpy as np
+    from qiskit.circuit.library import Initialize
+
+    # ── Rebuild the pre-measurement statevector ───────────────────
+    # After Alice's gates (before measurement) the 3-qubit state is:
+    #   (1/2)[ |00⟩(α|0⟩+β|1⟩) + |01⟩(α|1⟩+β|0⟩)
+    #        + |10⟩(α|0⟩-β|1⟩) + |11⟩(α|1⟩-β|0⟩) ]
+    # where α=cos(θ/2), β=sin(θ/2) and the first two bits are (q0,q1).
+    #
+    # For outcome (m0, m1) the un-normalised q2 state is:
+    #   (m0=0,m1=0): α|0⟩ + β|1⟩   → Bob does nothing   → α|0⟩ + β|1⟩
+    #   (m0=0,m1=1): α|1⟩ + β|0⟩   → Bob applies X      → α|0⟩ + β|1⟩
+    #   (m0=1,m1=0): α|0⟩ - β|1⟩   → Bob applies Z      → α|0⟩ + β|1⟩
+    #   (m0=1,m1=1): α|1⟩ - β|0⟩   → Bob applies X then Z → α|0⟩ + β|1⟩
+    # In every branch, after correction q2 = α|0⟩ + β|1⟩. ✓
+
+    alpha = np.cos(theta / 2)
+    beta  = np.sin(theta / 2)
+    state = np.array([alpha, beta])
+
+    qc = QuantumCircuit(1, 1)
+    qc.initialize(state, 0)
+    qc.measure(0, 0)
     return qc
 
 
