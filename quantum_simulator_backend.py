@@ -21,6 +21,17 @@ def run_and_get_histogram(circuit: QuantumCircuit, shots: int = 1024) -> dict:
     return result.get_counts()
 
 
+def run_single_shot(circuit: QuantumCircuit) -> str:
+    """
+    Run circuit for exactly 1 shot and return the bitstring result.
+    Useful for simulating individual runs of a protocol.
+    """
+    compiled = transpile(circuit, backend)
+    result = backend.run(compiled, shots=1).result()
+    counts = result.get_counts()
+    return list(counts.keys())[0]
+
+
 def get_statevector(circuit: QuantumCircuit) -> np.ndarray:
     qc_no_meas = circuit.remove_final_measurements(inplace=False)
     qc_no_meas.save_statevector()

@@ -92,39 +92,81 @@ def unitarity_circuit():
 
 
 # ─────────────────────────────────────────────
-# Q2.1  Quantum Teleportation
+# Teleportation – Alice's circuit
 # ─────────────────────────────────────────────
-def teleportation_circuit(theta: float):
+def alice_circuit(theta: float):
     """
-    3-qubit teleportation.
-    q0 = Alice's qubit (state to teleport) – prepared as Ry(θ)|0⟩
-    q1 = Alice's half of Bell pair
-    q2 = Bob's qubit
+    Alice's side of the teleportation protocol (preset circuit).
 
-    Labels: Bell State Preparation | Bell Measurement
+    q0 = state to teleport  → Ry(θ)|0⟩
+    q1 = Alice's Bell qubit
+    q2 = Bob's qubit  (entangled here, not measured by Alice)
+
+    Steps:
+      1. Prepare Alice's state: Ry(θ) on q0
+      2. Bell pair: H on q1, CNOT q1→q2
+      3. Bell measurement basis: CNOT q0→q1, H on q0
+      4. Alice measures q0 and q1 (Z basis)
+
+    Classical results m0, m1 are sent to Bob:
+      Bob applies Z if m0 == 1
+      Bob applies X if m1 == 1
     """
-    qc = QuantumCircuit(3, 3)
+    qc = QuantumCircuit(3, 2)   # 3 qubits, 2 classical bits for Alice's measurement
 
-    # ── Prepare the state to teleport ──────────────────────────────
+    # ── 1. Prepare state to teleport ──────────────────────────────
     qc.ry(theta, 0)
-    qc.barrier(label="State Prepared")
+    qc.barrier(label="Alice's State")
 
-    # ── Bell State Preparation ─────────────────────────────────────
+    # ── 2. Bell pair entanglement ─────────────────────────────────
     qc.h(1)
     qc.cx(1, 2)
-    qc.barrier(label="Bell State Prepared")
+    qc.barrier(label="Bell Pair")
 
-    # ── Bell Measurement (Alice's side) ───────────────────────────
+    # ── 3. Bell measurement basis rotation ────────────────────────
     qc.cx(0, 1)
     qc.h(0)
-    qc.barrier(label="Bell Measurement")
-    qc.measure([0, 1], [0, 1])
+    qc.barrier(label="Bell Basis")
 
-    # ── Classical Feed-Forward (Bob's corrections) ────────────────
+    # ── 4. Alice measures q0 → c0, q1 → c1 ───────────────────────
+    qc.measure(0, 0)
+    qc.measure(1, 1)
+
+    return qc
+
+
+def bob_circuit(theta: float, m0: int, m1: int):
+    """
+    Bob's correction circuit given Alice's classical results m0, m1.
+
+    Starts from |0⟩ and applies the same entanglement as alice_circuit
+    so that q2 is in the correct post-measurement state, then applies
+    Bob's conditional corrections and measures q2.
+
+    In a real experiment this would be a separate device; here we
+    reconstruct by re-running the full 3-qubit circuit conditioned on
+    the specific (m0, m1) outcome Alice observed, post-selecting on
+    that result, then applying corrections and measuring q2.
+
+    Returns a circuit that produces Bob's final measurement.
+    """
+    qc = QuantumCircuit(3, 1)   # 3 qubits, 1 classical bit for Bob
+
+    # Reproduce Alice's full preparation (same as alice_circuit)
+    qc.ry(theta, 0)
+    qc.h(1)
     qc.cx(1, 2)
-    qc.cz(0, 2)
-    qc.barrier(label="Bob's Correction")
-    qc.measure(2, 2)
+    qc.cx(0, 1)
+    qc.h(0)
+
+    # Bob's classical feed-forward corrections
+    if m1 == 1:
+        qc.x(2)   # X gate if Alice's q1 == 1
+    if m0 == 1:
+        qc.z(2)   # Z gate if Alice's q0 == 1
+
+    # Bob measures q2
+    qc.measure(2, 0)
 
     return qc
 

@@ -12,9 +12,10 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from quantum_simulator_backend import run_and_get_histogram
+from quantum_simulator_backend import run_and_get_histogram, run_single_shot
 from circuits import (
-    teleportation_circuit,
+    alice_circuit,
+    bob_circuit,
     hubbard_trotter_circuit,
     build_custom_circuit,
 )
@@ -196,51 +197,146 @@ with tab_preset:
         st.markdown("### Quantum Teleportation")
         st.markdown("""
         <div class="card">
-        3-qubit teleportation protocol.<br>
+        3-qubit teleportation protocol via a classical channel.<br>
         <b>q0</b> = Alice's qubit (state to teleport) &nbsp;·&nbsp;
         <b>q1</b> = Alice's Bell-pair qubit &nbsp;·&nbsp;
         <b>q2</b> = Bob's qubit.<br>
-        Adjust θ to change the state Alice sends. At θ = 0 Alice sends |0⟩;
-        at θ = π she sends |1⟩.
+        The preset circuit shows Alice's side only. After she measures q0 and q1,
+        the results are sent to Bob over a classical channel: Bob applies
+        <b>Z</b> if q0 = 1, and <b>X</b> if q1 = 1.
         </div>
         """, unsafe_allow_html=True)
 
         col_l, col_r = st.columns([1, 2])
         with col_l:
             theta = st.slider(
-                "Rotation angle θ (Alice's qubit)",
+                "Rotation angle θ (Alice's state)",
                 0.0, float(2 * np.pi), 0.0,
                 step=0.01, format="%.3f",
                 key="tele_theta",
             )
             st.caption(f"θ = {theta:.4f} rad  ({theta / np.pi:.3f} π)")
-            st.caption(f"|q0⟩ ∝ cos(θ/2)|0⟩ + sin(θ/2)|1⟩")
+            st.caption(f"|q0⟩ = cos(θ/2)|0⟩ + sin(θ/2)|1⟩")
 
-        circuit = teleportation_circuit(theta)
-
+        # Always show Alice's preset circuit
+        qc_alice = alice_circuit(theta)
         with col_r:
-            draw_circuit(circuit, "Teleportation Circuit")
+            draw_circuit(qc_alice, "Alice's Circuit (preset)")
 
-        if st.button("▶ Run Simulation (1024 shots)", key="run_tele"):
-            with st.spinner("Simulating …"):
-                counts = run_and_get_histogram(circuit, shots=1024)
-            show_histogram(counts, "Teleportation – Measurement Results")
+        st.markdown("---")
 
-            # Bob's qubit is classical bit 2; Qiskit prints MSB first,
-            # so it appears as the last character of the bitstring.
-            bob_0 = sum(v for k, v in counts.items() if k[-1] == "0")
-            bob_1 = sum(v for k, v in counts.items() if k[-1] == "1")
-            total  = bob_0 + bob_1
-            c1, c2 = st.columns(2)
-            c1.metric("P(Bob = |0⟩)", f"{bob_0 / total * 100:.1f}%")
-            c2.metric("P(Bob = |1⟩)", f"{bob_1 / total * 100:.1f}%")
+        # ── N-shot teleportation simulation ──────
+        st.markdown('<div class="section-label">Run teleportation</div>',
+                    unsafe_allow_html=True)
+
+        n_runs = st.slider("Number of teleportation runs (N)", 1, 1024, 100,
+                           key="tele_n_runs")
+
+        if st.button("▶ Run N Teleportations", key="run_tele"):
+            # ── Phase 1: run Alice's circuit N times, collect per-shot results ──
+            alice_counts: dict = {}   # {"m0 m1": count}
+            last_m0, last_m1 = 0, 0
+
+            with st.spinner(f"Running Alice's circuit {n_runs} times …"):
+                raw = run_and_get_histogram(qc_alice, shots=n_runs)
+                # Qiskit bitstring is MSB first: "m1 m0" → we want m0 (bit 0) and m1 (bit 1)
+                for bitstring, count in raw.items():
+                    # bitstring is "XY" where X=c1 (q1 result), Y=c0 (q0 result)
+                    # (Qiskit orders classical bits MSB-first in the string)
+                    m1 = int(bitstring[0])   # classical bit 1 → q1 measurement
+                    m0 = int(bitstring[1])   # classical bit 0 → q0 measurement
+                    key = f"q0={m0}, q1={m1}"
+                    alice_counts[key] = alice_counts.get(key, 0) + count
+                    last_m0, last_m1 = m0, m1   # just keep whichever is last iterated
+
+                # Find the most frequent outcome as "last" to display
+                most_common = max(raw.items(), key=lambda x: x[1])
+                mc_str = most_common[0]
+                last_m1 = int(mc_str[0])
+                last_m0 = int(mc_str[1])
+
+            # ── Display Alice's measurement counts ────────────────
+            st.markdown('<div class="section-label">Alice\'s measurement results</div>',
+                        unsafe_allow_html=True)
+
+            acol1, acol2, acol3, acol4 = st.columns(4)
+            for (label, cnt), col in zip(alice_counts.items(),
+                                         [acol1, acol2, acol3, acol4]):
+                col.metric(label, f"{cnt} shots", f"{cnt/n_runs*100:.1f}%")
+
+            with st.expander("Raw counts from Alice's circuit"):
+                st.write(raw)
+
+            st.markdown("---")
+
+            # ── Classical channel: show corrections for most common outcome ──
+            st.markdown('<div class="section-label">Classical channel → Bob\'s corrections</div>',
+                        unsafe_allow_html=True)
+
+            st.markdown(f"""
+            Most frequent outcome: **q0 = {last_m0}, q1 = {last_m1}**
+            """)
+
+            cc1, cc2 = st.columns(2)
+            cc1.markdown(
+                f"**Z gate on q2?** &nbsp; {'✅ Yes (q0 = 1)' if last_m0 == 1 else '❌ No (q0 = 0)'}",
+                unsafe_allow_html=True,
+            )
+            cc2.markdown(
+                f"**X gate on q2?** &nbsp; {'✅ Yes (q1 = 1)' if last_m1 == 1 else '❌ No (q1 = 0)'}",
+                unsafe_allow_html=True,
+            )
+
+            st.markdown("---")
+
+            # ── Phase 2: Bob's final state probabilities ──────────
+            # Run Bob's corrected circuit for each of the four (m0,m1) outcomes,
+            # weighted by how often Alice observed each.
+            st.markdown('<div class="section-label">Bob\'s final measurement</div>',
+                        unsafe_allow_html=True)
+
+            bob_0_total = 0
+            bob_1_total = 0
+
+            for bitstring, count in raw.items():
+                m1 = int(bitstring[0])
+                m0 = int(bitstring[1])
+                qc_bob = bob_circuit(theta, m0, m1)
+                bob_raw = run_and_get_histogram(qc_bob, shots=count if count > 0 else 1)
+                bob_0_total += bob_raw.get("0", 0)
+                bob_1_total += bob_raw.get("1", 0)
+
+            total_bob = bob_0_total + bob_1_total
+            p0 = bob_0_total / total_bob if total_bob > 0 else 0
+            p1 = bob_1_total / total_bob if total_bob > 0 else 0
+
+            bc1, bc2 = st.columns(2)
+            bc1.metric("P(Bob measures |0⟩)", f"{p0 * 100:.1f}%")
+            bc2.metric("P(Bob measures |1⟩)", f"{p1 * 100:.1f}%")
 
             expected_0 = np.cos(theta / 2) ** 2
-            st.markdown(f"""
-            **Expected (ideal):** P(|0⟩) = cos²(θ/2) = {expected_0:.3f},  
-            P(|1⟩) = sin²(θ/2) = {1 - expected_0:.3f}.  
-            Any deviation from ideal is shot noise (≈ 1/√1024 ≈ 3%).
-            """)
+            expected_1 = np.sin(theta / 2) ** 2
+
+            # Bob's histogram
+            fig, ax = plt.subplots(figsize=(4, 3))
+            bars = ax.bar(["Bob |0⟩", "Bob |1⟩"], [p0, p1],
+                          color=MAROON, edgecolor="white", width=0.5)
+            ax.axhline(expected_0, color="#AAAAAA", ls="--", lw=1.2,
+                       label=f"Expected |0⟩ = {expected_0:.3f}")
+            ax.axhline(expected_1, color="#888888", ls=":",  lw=1.2,
+                       label=f"Expected |1⟩ = {expected_1:.3f}")
+            for bar, p in zip(bars, [p0, p1]):
+                ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.01,
+                        f"{p:.3f}", ha="center", va="bottom", fontsize=10, color=DARK)
+            ax.set_ylim(0, 1.15)
+            ax.set_ylabel("Probability", fontsize=11)
+            ax.legend(fontsize=9)
+            ax.spines[["top", "right"]].set_visible(False)
+            ax.set_facecolor("#FAFAFA")
+            fig.patch.set_facecolor("white")
+            plt.tight_layout()
+            st.pyplot(fig, use_container_width=False)
+            plt.close(fig)
 
     # ─────────────────────────────────────────────
     # HUBBARD MODEL
@@ -395,166 +491,96 @@ with tab_preset:
 # TAB 2 – CUSTOM CIRCUIT
 # ═══════════════════════════════════════════════════════════════
 with tab_custom:
+    st.markdown("### Custom Circuit Builder")
 
-    # ── Constants ─────────────────────────────────
+    num_qubits = st.slider("Number of qubits", 1, 10, 3, key="custom_nq")
+
+    st.markdown("---")
+
+    # ── Gate catalogue ────────────────────────────
     SINGLE_QUBIT_GATES = ["H", "X", "Z", "RX", "RY", "RZ"]
     TWO_QUBIT_GATES    = ["CX", "SWAP"]
     ALL_GATES          = SINGLE_QUBIT_GATES + TWO_QUBIT_GATES
 
-    # ── Session state ─────────────────────────────
+    col_gate, col_param = st.columns([1, 2])
+    with col_gate:
+        gate = st.selectbox("Gate", ALL_GATES, key="custom_gate")
+
+    with col_param:
+        if gate in ["RX", "RY", "RZ"]:
+            param = st.slider(
+                "Angle θ", 0.0, float(2 * np.pi), 1.0,
+                format="%.3f", key="custom_angle",
+            )
+        else:
+            param = 0.0
+            st.write("")   # keep row height consistent
+
+    # ── Qubit selector ────────────────────────────
+    if gate in TWO_QUBIT_GATES:
+        cc1, cc2 = st.columns(2)
+        label_a  = "Control qubit" if gate == "CX" else "Qubit A"
+        label_b  = "Target qubit"  if gate == "CX" else "Qubit B"
+        with cc1:
+            ctrl = int(st.number_input(label_a, 0, num_qubits - 1, 0, key="custom_ctrl"))
+        with cc2:
+            tgt  = int(st.number_input(label_b, 0, num_qubits - 1,
+                                        min(1, num_qubits - 1), key="custom_tgt"))
+        qubit = 0
+    else:
+        qubit = int(st.number_input("Target qubit", 0, num_qubits - 1, 0, key="custom_qubit"))
+        ctrl = tgt = 0
+
+    # ── Add / Clear buttons ───────────────────────
     if "custom_ops" not in st.session_state:
         st.session_state.custom_ops = []
 
-    # ── Helper: one-line description of a gate op ─
-    def op_label(op):
-        g = op["gate"]
-        if g in ["RX", "RY", "RZ"]:
-            return f"{g}(θ={op['param']:.3f})  q{op['qubit']}"
-        elif g in ["CX", "SWAP"]:
-            return f"{g}  q{op['control']} → q{op['target']}"
-        else:
-            return f"{g}  q{op['qubit']}"
+    col_add, col_clear, _ = st.columns([1, 1, 4])
+    with col_add:
+        if st.button("➕ Add Gate", key="add_gate"):
+            op = {"gate": gate}
+            if gate in ["RX", "RY", "RZ"]:
+                op["qubit"] = qubit
+                op["param"] = param
+            elif gate in TWO_QUBIT_GATES:
+                op["control"] = ctrl
+                op["target"]  = tgt
+            else:
+                op["qubit"] = qubit
+            st.session_state.custom_ops.append(op)
 
-    # ── Helper: build an op dict from current widget values ──
-    def make_op(gate, qubit, ctrl, tgt, param):
-        op = {"gate": gate}
-        if gate in ["RX", "RY", "RZ"]:
-            op["qubit"] = qubit
-            op["param"] = param
-        elif gate in ["CX", "SWAP"]:
-            op["control"] = ctrl
-            op["target"]  = tgt
-        else:
-            op["qubit"] = qubit
-        return op
+    with col_clear:
+        if st.button("🗑 Clear All", key="clear_gates"):
+            st.session_state.custom_ops = []
 
-    # ─────────────────────────────────────────────────────────────
-    # Two-column layout: left = controls, right = live circuit
-    # ─────────────────────────────────────────────────────────────
-    left, right = st.columns([1, 2], gap="large")
+    # ── Gate sequence + circuit preview ──────────
+    if st.session_state.custom_ops:
+        st.markdown('<div class="section-label">Gate Sequence</div>',
+                    unsafe_allow_html=True)
 
-    with left:
-        st.markdown("### Custom Circuit Builder")
+        rows = []
+        for i, op in enumerate(st.session_state.custom_ops):
+            g = op["gate"]
+            if g in ["RX", "RY", "RZ"]:
+                target = f"q{op['qubit']}"
+                detail = f"θ = {op['param']:.3f} rad"
+            elif g in ["CX", "SWAP"]:
+                target = f"q{op['control']} → q{op['target']}"
+                detail = "3 CNOTs" if g == "SWAP" else ""
+            else:
+                target = f"q{op['qubit']}"
+                detail = ""
+            rows.append({"#": i + 1, "Gate": g, "Qubit(s)": target, "Detail": detail})
 
-        num_qubits = st.slider("Number of qubits", 1, 10, 3, key="custom_nq")
-        st.markdown("---")
+        st.table(rows)
 
-        # ── Gate picker ───────────────────────────
-        st.markdown('<div class="section-label">Add a gate</div>', unsafe_allow_html=True)
+        circuit = build_custom_circuit(num_qubits, st.session_state.custom_ops)
+        draw_circuit(circuit, "Circuit Preview")
 
-        gate = st.selectbox("Gate type", ALL_GATES, key="custom_gate")
+        if st.button("▶ Run Simulation", key="run_custom"):
+            with st.spinner("Simulating …"):
+                counts = run_and_get_histogram(circuit)
+            show_histogram(counts, "Custom Circuit Results")
 
-        if gate in ["RX", "RY", "RZ"]:
-            param = st.slider("Angle θ", 0.0, float(2 * np.pi), 1.0,
-                              format="%.3f", key="custom_angle")
-        else:
-            param = 0.0
-
-        if gate in TWO_QUBIT_GATES:
-            label_a = "Control qubit" if gate == "CX" else "Qubit A"
-            label_b = "Target qubit"  if gate == "CX" else "Qubit B"
-            ca, cb = st.columns(2)
-            with ca:
-                ctrl = int(st.number_input(label_a, 0, num_qubits - 1, 0,
-                                           key="custom_ctrl"))
-            with cb:
-                tgt = int(st.number_input(label_b, 0, num_qubits - 1,
-                                          min(1, num_qubits - 1), key="custom_tgt"))
-            qubit = 0
-        else:
-            qubit = int(st.number_input("Target qubit", 0, num_qubits - 1, 0,
-                                        key="custom_qubit"))
-            ctrl = tgt = 0
-
-        # Append-to-end
-        if st.button("➕ Append Gate", key="add_gate", use_container_width=True):
-            st.session_state.custom_ops.append(make_op(gate, qubit, ctrl, tgt, param))
-            st.rerun()
-
-        st.markdown("---")
-
-        # ── Interactive gate sequence editor ──────
-        ops = st.session_state.custom_ops
-
-        if ops:
-            st.markdown('<div class="section-label">Gate sequence</div>',
-                        unsafe_allow_html=True)
-            st.caption("↑ ↓ reorder · 🗑 delete · ＋ insert selected gate after this row")
-
-            # Column headers
-            hc = st.columns([2, 1, 1, 1, 1])
-            for col, lbl in zip(hc, ["Gate", "↑", "↓", "🗑", "＋"]):
-                col.markdown(f"<small><b>{lbl}</b></small>", unsafe_allow_html=True)
-
-            action = None  # only one action fires per rerun
-
-            for i, op in enumerate(ops):
-                rc = st.columns([2, 1, 1, 1, 1])
-
-                rc[0].markdown(
-                    f"`{i+1}.` <span style='font-family:monospace;font-size:0.8rem'>"
-                    f"{op_label(op)}</span>",
-                    unsafe_allow_html=True,
-                )
-
-                if rc[1].button("↑", key=f"up_{i}",
-                                disabled=(i == 0),
-                                use_container_width=True):
-                    action = ("move_up", i)
-
-                if rc[2].button("↓", key=f"dn_{i}",
-                                disabled=(i == len(ops) - 1),
-                                use_container_width=True):
-                    action = ("move_down", i)
-
-                if rc[3].button("🗑", key=f"del_{i}",
-                                use_container_width=True):
-                    action = ("delete", i)
-
-                if rc[4].button("＋", key=f"ins_{i}",
-                                use_container_width=True):
-                    action = ("insert_after", i)
-
-            # Apply the single action that fired this rerun
-            if action:
-                kind, idx = action
-                if kind == "move_up":
-                    ops[idx - 1], ops[idx] = ops[idx], ops[idx - 1]
-                elif kind == "move_down":
-                    ops[idx], ops[idx + 1] = ops[idx + 1], ops[idx]
-                elif kind == "delete":
-                    ops.pop(idx)
-                elif kind == "insert_after":
-                    ops.insert(idx + 1, make_op(gate, qubit, ctrl, tgt, param))
-                st.rerun()
-
-            st.markdown("---")
-            if st.button("🗑 Clear All", key="clear_gates", use_container_width=True):
-                st.session_state.custom_ops = []
-                st.rerun()
-
-        else:
-            st.info("Click **Append Gate** to start building your circuit.")
-
-    # ─────────────────────────────────────────────
-    # Right panel: live circuit preview + run
-    # ─────────────────────────────────────────────
-    with right:
-        ops = st.session_state.custom_ops
-        if ops:
-            circuit = build_custom_circuit(num_qubits, ops)
-            draw_circuit(circuit, "Circuit Preview")
-
-            st.markdown("")
-            if st.button("▶ Run Simulation", key="run_custom", use_container_width=True):
-                with st.spinner("Simulating …"):
-                    counts = run_and_get_histogram(circuit)
-                show_histogram(counts, "Measurement Results")
-        else:
-            st.markdown("""
-            <div class="card" style="margin-top:3rem; text-align:center; color:#999;">
-              <p style="font-size:1.1rem;">Your circuit will appear here.</p>
-              <p>Add gates using the panel on the left.</p>
-            </div>
-            """, unsafe_allow_html=True)
-
+    else:
+        st.info("Select a gate and qubit above, then click **➕ Add Gate** to start building.")
