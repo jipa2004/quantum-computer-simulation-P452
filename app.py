@@ -395,96 +395,166 @@ with tab_preset:
 # TAB 2 – CUSTOM CIRCUIT
 # ═══════════════════════════════════════════════════════════════
 with tab_custom:
-    st.markdown("### Custom Circuit Builder")
 
-    num_qubits = st.slider("Number of qubits", 1, 10, 3, key="custom_nq")
-
-    st.markdown("---")
-
-    # ── Gate catalogue ────────────────────────────
+    # ── Constants ─────────────────────────────────
     SINGLE_QUBIT_GATES = ["H", "X", "Z", "RX", "RY", "RZ"]
     TWO_QUBIT_GATES    = ["CX", "SWAP"]
     ALL_GATES          = SINGLE_QUBIT_GATES + TWO_QUBIT_GATES
 
-    col_gate, col_param = st.columns([1, 2])
-    with col_gate:
-        gate = st.selectbox("Gate", ALL_GATES, key="custom_gate")
-
-    with col_param:
-        if gate in ["RX", "RY", "RZ"]:
-            param = st.slider(
-                "Angle θ", 0.0, float(2 * np.pi), 1.0,
-                format="%.3f", key="custom_angle",
-            )
-        else:
-            param = 0.0
-            st.write("")   # keep row height consistent
-
-    # ── Qubit selector ────────────────────────────
-    if gate in TWO_QUBIT_GATES:
-        cc1, cc2 = st.columns(2)
-        label_a  = "Control qubit" if gate == "CX" else "Qubit A"
-        label_b  = "Target qubit"  if gate == "CX" else "Qubit B"
-        with cc1:
-            ctrl = int(st.number_input(label_a, 0, num_qubits - 1, 0, key="custom_ctrl"))
-        with cc2:
-            tgt  = int(st.number_input(label_b, 0, num_qubits - 1,
-                                        min(1, num_qubits - 1), key="custom_tgt"))
-        qubit = 0
-    else:
-        qubit = int(st.number_input("Target qubit", 0, num_qubits - 1, 0, key="custom_qubit"))
-        ctrl = tgt = 0
-
-    # ── Add / Clear buttons ───────────────────────
+    # ── Session state ─────────────────────────────
     if "custom_ops" not in st.session_state:
         st.session_state.custom_ops = []
 
-    col_add, col_clear, _ = st.columns([1, 1, 4])
-    with col_add:
-        if st.button("➕ Add Gate", key="add_gate"):
-            op = {"gate": gate}
-            if gate in ["RX", "RY", "RZ"]:
-                op["qubit"] = qubit
-                op["param"] = param
-            elif gate in TWO_QUBIT_GATES:
-                op["control"] = ctrl
-                op["target"]  = tgt
-            else:
-                op["qubit"] = qubit
-            st.session_state.custom_ops.append(op)
+    # ── Helper: one-line description of a gate op ─
+    def op_label(op):
+        g = op["gate"]
+        if g in ["RX", "RY", "RZ"]:
+            return f"{g}(θ={op['param']:.3f})  q{op['qubit']}"
+        elif g in ["CX", "SWAP"]:
+            return f"{g}  q{op['control']} → q{op['target']}"
+        else:
+            return f"{g}  q{op['qubit']}"
 
-    with col_clear:
-        if st.button("🗑 Clear All", key="clear_gates"):
-            st.session_state.custom_ops = []
+    # ── Helper: build an op dict from current widget values ──
+    def make_op(gate, qubit, ctrl, tgt, param):
+        op = {"gate": gate}
+        if gate in ["RX", "RY", "RZ"]:
+            op["qubit"] = qubit
+            op["param"] = param
+        elif gate in ["CX", "SWAP"]:
+            op["control"] = ctrl
+            op["target"]  = tgt
+        else:
+            op["qubit"] = qubit
+        return op
 
-    # ── Gate sequence + circuit preview ──────────
-    if st.session_state.custom_ops:
-        st.markdown('<div class="section-label">Gate Sequence</div>',
-                    unsafe_allow_html=True)
+    # ─────────────────────────────────────────────────────────────
+    # Two-column layout: left = controls, right = live circuit
+    # ─────────────────────────────────────────────────────────────
+    left, right = st.columns([1, 2], gap="large")
 
-        rows = []
-        for i, op in enumerate(st.session_state.custom_ops):
-            g = op["gate"]
-            if g in ["RX", "RY", "RZ"]:
-                target = f"q{op['qubit']}"
-                detail = f"θ = {op['param']:.3f} rad"
-            elif g in ["CX", "SWAP"]:
-                target = f"q{op['control']} → q{op['target']}"
-                detail = "3 CNOTs" if g == "SWAP" else ""
-            else:
-                target = f"q{op['qubit']}"
-                detail = ""
-            rows.append({"#": i + 1, "Gate": g, "Qubit(s)": target, "Detail": detail})
+    with left:
+        st.markdown("### Custom Circuit Builder")
 
-        st.table(rows)
+        num_qubits = st.slider("Number of qubits", 1, 10, 3, key="custom_nq")
+        st.markdown("---")
 
-        circuit = build_custom_circuit(num_qubits, st.session_state.custom_ops)
-        draw_circuit(circuit, "Circuit Preview")
+        # ── Gate picker ───────────────────────────
+        st.markdown('<div class="section-label">Add a gate</div>', unsafe_allow_html=True)
 
-        if st.button("▶ Run Simulation", key="run_custom"):
-            with st.spinner("Simulating …"):
-                counts = run_and_get_histogram(circuit)
-            show_histogram(counts, "Custom Circuit Results")
+        gate = st.selectbox("Gate type", ALL_GATES, key="custom_gate")
 
-    else:
-        st.info("Select a gate and qubit above, then click **➕ Add Gate** to start building.")
+        if gate in ["RX", "RY", "RZ"]:
+            param = st.slider("Angle θ", 0.0, float(2 * np.pi), 1.0,
+                              format="%.3f", key="custom_angle")
+        else:
+            param = 0.0
+
+        if gate in TWO_QUBIT_GATES:
+            label_a = "Control qubit" if gate == "CX" else "Qubit A"
+            label_b = "Target qubit"  if gate == "CX" else "Qubit B"
+            ca, cb = st.columns(2)
+            with ca:
+                ctrl = int(st.number_input(label_a, 0, num_qubits - 1, 0,
+                                           key="custom_ctrl"))
+            with cb:
+                tgt = int(st.number_input(label_b, 0, num_qubits - 1,
+                                          min(1, num_qubits - 1), key="custom_tgt"))
+            qubit = 0
+        else:
+            qubit = int(st.number_input("Target qubit", 0, num_qubits - 1, 0,
+                                        key="custom_qubit"))
+            ctrl = tgt = 0
+
+        # Append-to-end
+        if st.button("➕ Append Gate", key="add_gate", use_container_width=True):
+            st.session_state.custom_ops.append(make_op(gate, qubit, ctrl, tgt, param))
+            st.rerun()
+
+        st.markdown("---")
+
+        # ── Interactive gate sequence editor ──────
+        ops = st.session_state.custom_ops
+
+        if ops:
+            st.markdown('<div class="section-label">Gate sequence</div>',
+                        unsafe_allow_html=True)
+            st.caption("↑ ↓ reorder · 🗑 delete · ＋ insert selected gate after this row")
+
+            # Column headers
+            hc = st.columns([2, 1, 1, 1, 1])
+            for col, lbl in zip(hc, ["Gate", "↑", "↓", "🗑", "＋"]):
+                col.markdown(f"<small><b>{lbl}</b></small>", unsafe_allow_html=True)
+
+            action = None  # only one action fires per rerun
+
+            for i, op in enumerate(ops):
+                rc = st.columns([2, 1, 1, 1, 1])
+
+                rc[0].markdown(
+                    f"`{i+1}.` <span style='font-family:monospace;font-size:0.8rem'>"
+                    f"{op_label(op)}</span>",
+                    unsafe_allow_html=True,
+                )
+
+                if rc[1].button("↑", key=f"up_{i}",
+                                disabled=(i == 0),
+                                use_container_width=True):
+                    action = ("move_up", i)
+
+                if rc[2].button("↓", key=f"dn_{i}",
+                                disabled=(i == len(ops) - 1),
+                                use_container_width=True):
+                    action = ("move_down", i)
+
+                if rc[3].button("🗑", key=f"del_{i}",
+                                use_container_width=True):
+                    action = ("delete", i)
+
+                if rc[4].button("＋", key=f"ins_{i}",
+                                use_container_width=True):
+                    action = ("insert_after", i)
+
+            # Apply the single action that fired this rerun
+            if action:
+                kind, idx = action
+                if kind == "move_up":
+                    ops[idx - 1], ops[idx] = ops[idx], ops[idx - 1]
+                elif kind == "move_down":
+                    ops[idx], ops[idx + 1] = ops[idx + 1], ops[idx]
+                elif kind == "delete":
+                    ops.pop(idx)
+                elif kind == "insert_after":
+                    ops.insert(idx + 1, make_op(gate, qubit, ctrl, tgt, param))
+                st.rerun()
+
+            st.markdown("---")
+            if st.button("🗑 Clear All", key="clear_gates", use_container_width=True):
+                st.session_state.custom_ops = []
+                st.rerun()
+
+        else:
+            st.info("Click **Append Gate** to start building your circuit.")
+
+    # ─────────────────────────────────────────────
+    # Right panel: live circuit preview + run
+    # ─────────────────────────────────────────────
+    with right:
+        ops = st.session_state.custom_ops
+        if ops:
+            circuit = build_custom_circuit(num_qubits, ops)
+            draw_circuit(circuit, "Circuit Preview")
+
+            st.markdown("")
+            if st.button("▶ Run Simulation", key="run_custom", use_container_width=True):
+                with st.spinner("Simulating …"):
+                    counts = run_and_get_histogram(circuit)
+                show_histogram(counts, "Measurement Results")
+        else:
+            st.markdown("""
+            <div class="card" style="margin-top:3rem; text-align:center; color:#999;">
+              <p style="font-size:1.1rem;">Your circuit will appear here.</p>
+              <p>Add gates using the panel on the left.</p>
+            </div>
+            """, unsafe_allow_html=True)
+
