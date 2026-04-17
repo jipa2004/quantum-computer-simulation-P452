@@ -434,12 +434,115 @@ with tab_preset:
 
         st.markdown("---")
 
-        # ── Run simulation ────────────────────────
+        # ── Single-time snapshot ──────────────────
+        st.markdown('<div class="section-label">Snapshot at τ</div>',
+                    unsafe_allow_html=True)
         n_shots = st.slider("Shots", 256, 4096, 1024, step=256, key="hub_shots")
         if st.button("Run Hubbard Simulation", key="run_hub"):
             with st.spinner("Simulating ..."):
                 counts = run_and_get_histogram(qc_hub, shots=n_shots)
             show_histogram(counts, "Hubbard – Measurement Results")
+
+        st.markdown("---")
+
+        # ── Dynamics: P(state) vs time ────────────
+        st.markdown('<div class="section-label">Time Evolution</div>',
+                    unsafe_allow_html=True)
+        st.caption(
+            "Sweeps τ from 0 to the current slider value and plots the exact "
+            "statevector probability of the selected states at each time point."
+        )
+
+        # All 16 possible 4-qubit bitstrings (Qiskit ordering: q3q2q1q0)
+        all_states = [format(i, "04b") for i in range(16)]
+
+        dyn_col1, dyn_col2 = st.columns([1, 2])
+        with dyn_col1:
+            n_pts = st.slider("Time points", 10, 100, 40, key="hub_npts")
+            selected_states = st.multiselect(
+                "States to plot",
+                options=all_states,
+                default=["1000", "0010"],   # sensible starting default
+                key="hub_states",
+            )
+
+        if st.button("Compute Dynamics", key="hub_dynamics"):
+            if not selected_states:
+                st.warning("Select at least one state to plot.")
+            else:
+                times = np.linspace(0.0, tau_val, n_pts)
+                # probs[state] = list of probabilities at each time point
+                probs_t = {s: [] for s in selected_states}
+
+                progress = st.progress(0, text="Computing statevectors ...")
+                for ti, t in enumerate(times):
+                    if t == 0.0:
+                        # Build a circuit with just init ops and measure to get |init> probs
+                        qc_t = hubbard_trotter_circuit(
+                            J=J_val, U=U_val, tau=1e-9,
+                            n_steps=1,
+                            init_ops=st.session_state.hub_init_ops,
+                        )
+                    else:
+                        qc_t = hubbard_trotter_circuit(
+                            J=J_val, U=U_val, tau=t,
+                            n_steps=n_steps_val,
+                            init_ops=st.session_state.hub_init_ops,
+                        )
+
+                    from quantum_simulator_backend import get_statevector
+                    sv = get_statevector(qc_t)          # complex amplitudes, length 16
+                    probs_all = np.abs(sv) ** 2         # probabilities for all 16 states
+
+                    # Qiskit statevector index i corresponds to bitstring bin(i)
+                    # with q0 = LSB.  The displayed bitstring is big-endian (q3q2q1q0),
+                    # so state "1000" means q3=1,q2=0,q1=0,q0=0 → index 8.
+                    for s in selected_states:
+                        idx = int(s, 2)                 # "1000" → 8, "0010" → 2
+                        probs_t[s].append(float(probs_all[idx]))
+
+                    progress.progress((ti + 1) / n_pts,
+                                      text=f"τ = {t:.3f} ...")
+                progress.empty()
+
+                # ── Plot ──────────────────────────────────
+                # Use a colour palette that works well with the maroon theme
+                palette = [
+                    MAROON, "#4E6A9E", "#2E8B57", "#D4853A",
+                    "#7B3F9E", "#C0392B", "#1A7A6E", "#8B6914",
+                    "#5D6D7E", "#A93226", "#148F77", "#B7950B",
+                    "#6E2F8E", "#1A5276", "#117A65", "#784212",
+                ]
+
+                fig, ax = plt.subplots(figsize=(9, 4))
+                for si, s in enumerate(selected_states):
+                    color = palette[si % len(palette)]
+                    ax.plot(times, probs_t[s], "-o", color=color,
+                            ms=3, lw=1.8, label=f"|{s}⟩")
+
+                ax.set_xlabel("Time τ", fontsize=12)
+                ax.set_ylabel("Probability", fontsize=12)
+                ax.set_ylim(-0.02, 1.05)
+                ax.set_xlim(times[0], times[-1])
+                ax.set_title(
+                    f"Hubbard dynamics  (J={J_val}, U={U_val}, "
+                    f"{n_steps_val} Trotter step{'s' if n_steps_val > 1 else ''})",
+                    fontsize=12,
+                )
+                ax.legend(fontsize=10, loc="upper right",
+                          framealpha=0.9, edgecolor="#E0C0C0")
+                ax.spines[["top", "right"]].set_visible(False)
+                ax.set_facecolor("#FAFAFA")
+                fig.patch.set_facecolor("white")
+                plt.tight_layout()
+                st.pyplot(fig, use_container_width=True)
+                plt.close(fig)
+
+                with st.expander("Raw probability table"):
+                    import pandas as pd
+                    df = pd.DataFrame({"τ": times, **{f"|{s}⟩": probs_t[s]
+                                                      for s in selected_states}})
+                    st.dataframe(df.style.format("{:.4f}"), use_container_width=True)
 
 
 # ═══════════════════════════════════════════════════════════════
